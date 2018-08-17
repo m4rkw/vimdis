@@ -57,7 +57,6 @@ class Dis:
         arches.append(match.group(1))
 
     if len(arches) == 0:
-      print "%s is not a Mach-O executable." % (path)
       return False
 
     if arch in arches:
@@ -97,6 +96,7 @@ class Dis:
     arch = self.validate_arch(path, arch)
 
     if not arch:
+      os.system("%s '%s'" % (self.vim, path))
       return
 
     sha256 = self.sha256(path)
