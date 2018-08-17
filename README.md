@@ -1,5 +1,5 @@
 vimdis.py by m4rkw - edit binary files with vim :P
-##################################################
+--------------------------------------------------
 
 - uses otool to disassemble Mach-O binaries
 - edit opcode bytes and save the file to patch
