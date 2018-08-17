@@ -35,6 +35,10 @@ class Dis:
     sys.exit(0)
 
 
+  def escape(self, string):
+    return "'" + string.replace("'", "'\\''") + "'"
+
+
   def get_vim_path(self):
     i = os.path.abspath(__file__)
 
@@ -50,7 +54,7 @@ class Dis:
   def validate_arch(self, path, arch):
     arches = []
 
-    for line in os.popen("/usr/bin/file '%s'" % (path)).read().rstrip().split("\n"):
+    for line in os.popen("/usr/bin/file %s" % (self.escape(path))).read().rstrip().split("\n"):
       match = re.match("^.*?Mach-O.*?executable (.*?)$", line)
 
       if match:
@@ -96,8 +100,7 @@ class Dis:
     arch = self.validate_arch(path, arch)
 
     if not arch:
-      os.system("%s '%s'" % (self.vim, path))
-      return
+      return False
 
     sha256 = self.sha256(path)
 
@@ -113,11 +116,13 @@ class Dis:
       if not match or match.group(1) != sha256:
         lines = None
 
-    if lines == None:
+    if lines != None:
+      print "cached: %s arch=%s ..." % (path, arch)
+    else:
       print "disassembling %s arch=%s ..." % (path, arch)
 
       lines = ["sha256: %s" % (sha256)]
-      lines += os.popen("otool -arch %s -jtvV '%s'" % (arch, path)).read().split("\n")
+      lines += os.popen("otool -arch %s -jtvV %s" % (arch, self.escape(path))).read().split("\n")
 
       opcode_width = DEFAULT_OPCODE_WIDTH
 
@@ -154,68 +159,99 @@ class Dis:
 
     shutil.copyfile(tmpfile, "%s.bak" % (tmpfile))
 
-    sha256_before = self.sha256(tmpfile)
-
-    os.system("%s %s" % (self.vim, tmpfile))
-
-    if self.sha256(tmpfile) != sha256_before:
-      new = open(tmpfile, 'r').read().split("\n")
-      old = open("%s.bak" % (tmpfile), 'r').read().split("\n")
-
-      if len(new) != len(old):
-        print "ERROR: file must have the same number of lines!"
-        os.rename("%s.bak" % (tmpfile), tmpfile)
-        sys.exit(1)
-
-      data = None
-
-      modified_lines = []
-
-      for i in range(0, len(new)):
-        new_line = new[i]
-        old_line = old[i]
-
-        old_match = re.match("^([\da-f]+)[\s\t]+([\da-f]+)[\s\t]+", old_line)
-        new_match = re.match("^([\da-f]+)[\s\t]+([\da-f]+)[\s\t]+", new_line)
-
-        if old_match and new_match and old_match.group(2) != new_match.group(2):
-          modified_lines.append(i)
-
-          print "patching %s: %s => %s" % (new_match.group(1), old_match.group(2), new_match.group(2))
-
-          if len(old_match.group(2)) != len(new_match.group(2)):
-            print "ERROR: number of opcode bytes cannot change!"
-            os.rename("%s.bak" % (tmpfile), tmpfile)
-            sys.exit(1)
-
-          if data == None:
-            data = list(open(path, 'r').read())
-
-          data = self.patch(path, new_match.group(1), new_match.group(2), data)
-
-      if data != None:
-        with open(path, 'w') as f:
-          f.write("".join(data))
-
-        lines = open(tmpfile,'r').read().split("\n")
-
-        lines[0] = 'sha256: %s' % (self.sha256(path))
-
-        for i in modified_lines:
-          if '** PATCHED **' not in lines[i]:
-            lines[i] += '  ** PATCHED **'
-
-        with open(tmpfile,'w') as f:
-          f.write("\n".join(lines))
-
-    os.remove("%s.bak" % (tmpfile))
+    return tmpfile
 
 
-  def patch(self, path, offset, opcode, data):
+  def edit(self, paths, disas):
+    cmd = self.vim
+
+    for path in paths:
+      if path in disas.keys():
+        cmd += " %s" % (self.escape(disas[path]["path"]))
+      else:
+        cmd += " %s" % (self.escape(path))
+
+    os.system(cmd)
+    
+
+  def patch(self, paths, disas):
+    for path in paths:
+      if path not in disas.keys():
+        continue
+
+      sha256_before = disas[path]["sha256"]
+      tmpfile = disas[path]["path"]
+
+      if sha256_before == self.sha256(tmpfile):
+        print "%s: no change" % (path)
+      else:
+        new = open(tmpfile, 'r').read().split("\n")
+        old = open("%s.bak" % (tmpfile), 'r').read().split("\n")
+
+        if len(new) != len(old):
+          print "ERROR: file must have the same number of lines!"
+          os.rename("%s.bak" % (tmpfile), tmpfile)
+          sys.exit(1)
+
+        data = None
+
+        modified_lines = []
+
+        for i in range(0, len(new)):
+          new_line = new[i]
+          old_line = old[i]
+
+          old_match = re.match("^([\da-f]+)[\s\t]+([\da-f]+)[\s\t]+", old_line)
+          new_match = re.match("^([\da-f]+)[\s\t]+([\da-f]+)[\s\t]+", new_line)
+
+          if old_match and new_match and old_match.group(2) != new_match.group(2):
+            modified_lines.append(i)
+
+            offset = self.get_offset(new_match.group(1))
+
+            print "%s: patching 0x%s: %s => %s" % (path, offset, old_match.group(2), new_match.group(2))
+
+            if len(old_match.group(2)) != len(new_match.group(2)):
+              print "ERROR: number of opcode bytes cannot change!"
+              os.rename("%s.bak" % (tmpfile), tmpfile)
+              sys.exit(1)
+
+            if data == None:
+              data = list(open(path, 'r').read())
+
+            data = self.patch_bytes(path, offset, new_match.group(2), data)
+
+        if data != None:
+          with open(path, 'w') as f:
+            f.write("".join(data))
+
+          lines = open(tmpfile,'r').read().split("\n")
+
+          lines[0] = 'sha256: %s' % (self.sha256(path))
+
+          for i in modified_lines:
+            if '** PATCHED **' not in lines[i]:
+              lines[i] += '  ** PATCHED **'
+
+          with open(tmpfile,'w') as f:
+            f.write("\n".join(lines))
+
+      os.remove("%s.bak" % (tmpfile))
+
+
+  def get_offset(self, offset):
     x = list(offset)
     x[7] = '0'
+
+    while x[0] == '0':
+      x = x[1:]
+
     offset = "".join(x)
 
+    return offset
+
+
+  def patch_bytes(self, path, offset, opcode, data):
     offset_dec = int(offset, 16)
 
     for i in range(0, len(opcode), 2):
@@ -244,8 +280,17 @@ for i in range(1, len(sys.argv)):
 if len(paths) == 0:
   d.usage()
 
+disas = {}
+
 for path in paths:
-  if not os.path.exists(path):
-    print "%s does not exist!" % (path)
-  else:
-    d.disas(path, arch)
+  if os.path.exists(path):
+    tmpfile = d.disas(path, arch)
+
+    if tmpfile:
+      disas[path] = {
+        "path": tmpfile,
+        "sha256": d.sha256(tmpfile)
+      }
+
+d.edit(paths, disas)
+d.patch(paths, disas)
