@@ -2,7 +2,9 @@
 #
 # vimdis.py by m4rkw - edit binary files with vim :P
 #
-# uses otool to disassemble Mach-O binaries
+# uses otool to disassemble Mach-O binaries on macOS and
+# objdump to disassemble ELF binaries on Linux
+#
 # edit opcode bytes and save the file to patch
 #
 # patched lines will be indicated so you know that the instructions after the
@@ -20,11 +22,20 @@ import shutil
 
 DEFAULT_OPCODE_WIDTH  = 8
 ARCH_PREFERENCE_ORDER = ['x86_64', 'i386']
+PLATFORMS = {
+  "darwin": "^([\da-f]+)[\t]([\da-f\s]+)[\t](.*?)$",
+  "linux": "^[\s\t]*([\da-f]+):[\t]([\da-f\s]+)[\t](.*?)$"
+}
 
 class Dis:
   def __init__(self):
     self.vim = self.get_vim_path()
     self.datadir = "%s/.vimdis" % (os.environ['HOME'])
+    self.platform = str.lower(os.popen("uname").read().rstrip())
+
+    if self.platform not in ['darwin', 'linux']:
+      print "unsupported platform: %s" % (self.platform)
+      sys.exit(1)
 
     if not os.path.exists(self.datadir):
       os.mkdir(self.datadir, 0755)
@@ -96,11 +107,26 @@ class Dis:
     return m.hexdigest()
 
 
-  def disas(self, path, arch):
-    arch = self.validate_arch(path, arch)
+  def platform_call(self, method_prefix, args):
+    method = getattr(self, '%s_%s' % (method_prefix, self.platform))
 
-    if not arch:
-      return False
+    return method(*args)
+
+
+  def disassemble_darwin(self, arch, path):
+    return os.popen("otool -arch %s -jtvV %s" % (arch, self.escape(path))).read().split("\n")
+
+
+  def disassemble_linux(self, arch, path):
+    return os.popen("objdump -d %s" % (self.escape(path))).read().split("\n")
+
+
+  def disas(self, path, arch):
+    if self.platform == 'darwin':
+      arch = self.validate_arch(path, arch)
+
+      if not arch:
+        return False
 
     sha256 = self.sha256(path)
 
@@ -122,34 +148,18 @@ class Dis:
       print "disassembling %s arch=%s ..." % (path, arch)
 
       lines = ["sha256: %s" % (sha256)]
-      lines += os.popen("otool -arch %s -jtvV %s" % (arch, self.escape(path))).read().split("\n")
+      lines += self.platform_call('disassemble', [arch, path])
 
-      opcode_width = DEFAULT_OPCODE_WIDTH
-
-      for line in lines:
-        match = re.match("^[\da-f]+", line)
-
-        if match:
-          seg = line.split('\t')
-          opcode = seg[1].replace(' ','')
-
-          if len(opcode) > opcode_width:
-            opcode_width = len(opcode)
+      opcode_width = self.get_opcode_width(lines)
 
       with open(tmpfile,'w') as f:
         for line in lines:
           line = line.rstrip()
 
-          match = re.match("^[\da-f]+", line)
+          detail = self.parse_code_line(line)
 
-          if match:
-            seg = line.split('\t')
-
-            offset = seg[0]
-            opcode = seg[1].replace(' ','')
-            instr = " ".join(seg[2:])
-
-            f.write("%s    %s    %s\n" % (offset, opcode.ljust(opcode_width), instr))
+          if detail:
+            f.write("%s    %s    %s\n" % (detail["offset"], detail["opcode"].ljust(opcode_width), detail["instr"]))
           else:
             if len(line) >0 and line[-1] == ':':
               f.write("\n")
@@ -160,6 +170,31 @@ class Dis:
     shutil.copyfile(tmpfile, "%s.bak" % (tmpfile))
 
     return tmpfile
+
+
+  def parse_code_line(self, line):
+    match = re.match(PLATFORMS[self.platform], line)
+
+    if match:
+      return {
+        "offset": match.group(1),
+        "opcode": match.group(2).replace(' ',''),
+        "instr": match.group(3)
+      }
+
+    return False
+
+
+  def get_opcode_width(self, lines):
+    opcode_width = DEFAULT_OPCODE_WIDTH
+
+    for line in lines:
+      detail = self.parse_code_line(line)
+
+      if detail and len(detail["opcode"]) > opcode_width:
+        opcode_width = len(detail["opcode"])
+
+    return opcode_width
 
 
   def edit(self, paths, disas):
@@ -240,6 +275,9 @@ class Dis:
 
 
   def get_offset(self, offset):
+    if self.platform != 'darwin':
+      return offset
+
     x = list(offset)
     x[7] = '0'
 
