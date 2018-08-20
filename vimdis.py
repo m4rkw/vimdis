@@ -127,6 +127,9 @@ class Dis:
 
       if not arch:
         return False
+    elif self.platform == 'linux':
+      if not re.match("^.*?: ELF", os.popen("file %s" % (self.escape(path))).read().rstrip()):
+        return False
 
     sha256 = self.sha256(path)
 
